@@ -226,7 +226,7 @@
   [db table]
   (jdbc/query
     (db-spec db)
-    ["SELECT 1 FROM information_schema.tables WHERE table_name = ?" table]
+    ["SELECT 1 FROM information_schema.tables WHERE table_schema=database() and table_name = ?" table]
     :result-set-fn first))
 
 (defn- column-exists?
