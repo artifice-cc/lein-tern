@@ -262,7 +262,7 @@
   [db table column]
   (jdbc/query
    (db-spec db)
-   ["SELECT 1 from information_schema.columns where table_name=? and column_name=?" table column]
+   ["SELECT 1 from information_schema.columns where table_schema=database() and table_name=? and column_name=?" table column]
    :result-set-fn first))
 
 (defn- create-database
