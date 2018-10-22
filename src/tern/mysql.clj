@@ -311,7 +311,7 @@
 
 (defn- update-schema-version
   [version-table version]
-  (format "INSERT INTO %s (version) VALUES (%s)"
+  (format "INSERT INTO %s (version,created) VALUES (%s,CURRENT_TIMESTAMP)"
           version-table version))
 
 (defn- run-migration!
