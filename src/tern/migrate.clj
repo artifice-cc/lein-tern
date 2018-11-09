@@ -1,16 +1,57 @@
 (ns tern.migrate
   (:require [tern.db         :as db]
             [tern.file       :refer :all]
+            [tern.log        :as log]
             [tern.misc       :refer [last-but-one]]
             [clojure.edn     :as edn]
             [clojure.java.io :as io]
-            [clojure.string  :as s]))
+            [clojure.string  :as s])
+  (:import [java.nio.file FileSystems FileSystem Path Paths Files FileVisitOption OpenOption]
+           [java.nio.file.spi FileSystemProvider]
+           [java.net URI URL]
+           [java.io File]
+           [java.util Collections]
+           [java.util.stream Stream]))
+
+(declare get-migration)
+
+(defmulti enumerate-files (fn [root] (type root)))
+
+(defmethod enumerate-files java.io.File [root]
+  (map #(.toPath %) (file-seq root)))
+    
+(defmethod enumerate-files java.net.URI [root]
+  (log/info "Enumerating migration files from" root)
+  (let [^Path path  (case (.getScheme root)
+                      "jar" (let [^FileSystems fs (or (try (FileSystems/getFileSystem ^URI root)
+                                                           (catch java.nio.file.FileSystemNotFoundException _
+                                                             nil))
+                                                      (FileSystems/newFileSystem ^URI root (Collections/emptyMap)))
+                                  scheme-specific (.getSchemeSpecificPart root)
+                                  scheme-path (.getPath (URI. scheme-specific))
+                                  resource-path (second (re-matches #".+!(.+)" scheme-path))]
+                              (.getPath fs resource-path (make-array String 0)))
+                      "file" (Paths/get root)
+                      (Paths/get root))
+        ^Stream walk (Files/walk path (into-array FileVisitOption [FileVisitOption/FOLLOW_LINKS]))]
+    (log/info "Will walk this path:" path)
+    (iterator-seq (.iterator walk))
+    ))
+
+(defmethod enumerate-files java.net.URL [root]
+  (if root
+    (enumerate-files (.toURI root))
+    []))
+
 
 (defn- get-migrations
   "Returns a sequence of all migration files, sorted by name."
   [{:keys [migration-dir]}]
-  (->> (io/file migration-dir)
-       (file-seq)
+  (->> (enumerate-files (or (io/resource migration-dir)
+                            (try (.toURI (.getResource (type get-migration) migration-dir))
+                                 (catch Exception e
+                                   (log/error (format "Unable to find migration resource in %s" migration-dir))
+                                   nil))))
        (filter edn?)
        (sort-by fname)))
 
@@ -53,11 +94,18 @@
   [config version]
   (last (completed config version)))
 
+(defn- path->stream
+  [^Path p]
+  (.newInputStream ^FileSystemProvider (.provider ^FileSystem (.getFileSystem p))
+                   p
+                   (make-array OpenOption 0)))
+
 (defn run
   "Run the given migration."
   [impl migration]
   (let [version  (parse-version migration)
-        commands (-> migration slurp edn/read-string :up)]
+        commands (with-open [s (path->stream migration)]
+                   (-> s slurp edn/read-string :up))]
     (db/migrate impl version commands)))
 
 (defn rollback
@@ -65,8 +113,9 @@
   but simply passes the `down` commands and the version of the migration that's
   being rolled back to."
   [impl migration version]
-  (let [commands (-> migration slurp edn/read-string :down)]
-    (db/migrate impl version commands)))
+  (let [commands (with-open [s (path->stream migration)]
+                   (-> s slurp edn/read-string :down))]
+        (db/migrate impl version commands)))
 
 (defn reset
   "Roll back ALL migrations."

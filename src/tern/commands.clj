@@ -56,8 +56,8 @@
     (log/info "#######################################################")
     (log/info "Migrating from version" (log/highlight from) "to" (log/highlight to))
     (log/info "#######################################################")
-    (doseq [migration pending]
-      (log/info "Processing" (log/filename (fname migration)))
+    (doseq [[index migration] (map-indexed (fn [i m] [i m]) pending)]
+      (log/info "Processing" (log/filename (fname migration)) (format "(%d of %d)" (inc index) (count pending)))
       (migrate/run impl migration))
     (if (seq pending)
       (log/info "Migration complete")

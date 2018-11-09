@@ -30,7 +30,13 @@
   (.mkdir (File. migration-dir))
   (doto (generate-name migration-dir name) (spit empty-migration)))
 
-(defn fname
+(defmulti fname (fn [f] (type f)))
+(defmethod fname :default [f] (str f))
+(defmethod fname String [f] f)
+(defmethod fname java.io.File [f] (.getName f))
+(defmethod fname java.nio.file.Path [f] (str (.getFileName f)))
+
+#_(defn fname
   "Wrapper for file.getName() because I am a bad person,
   and can't just leave Clojure's Java interop alone and
   get on with more important things instead."
@@ -47,11 +53,11 @@
   [f]
   (or (second (re-find #"\.([^\.]+)$" (fname f))) ""))
 
-(defn has-exension?
+(defn has-extension?
   "Checks if a file has the given extension."
   [ext f]
   (= ext (extension f)))
 
 (def edn?
   ^{:doc "Checks if a file has the `edn` extension." }
-  (partial has-exension? "edn"))
+  (partial has-extension? "edn"))
