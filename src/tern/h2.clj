@@ -154,7 +154,7 @@
         new-constraints
         (mapcat (fn [[constraint & specs]]
                   (let [spec-sql (s/join " " specs)
-                        [_ fkcolumn pktable pkcolumn] (re-matches #"\(([\w_]+)\)\s+REFERENCES\s+([\w_]+)\(([\w_]+)\).*" spec-sql)
+                        [_ fkcolumn pktable pkcolumn] (re-matches #"(?i)\(([\w_]+)\)\s+REFERENCES\s+([\w_]+)\(([\w_]+)\).*" spec-sql)
                         _ (if (or (nil? fkcolumn) (nil? pktable) (nil? pkcolumn))
                             (log/error "Failed to parse constraint for" constraint ":" spec-sql))
                         existing-constraints (get-matching-foreign-keys *db* (to-sql-name table) (to-sql-name fkcolumn)
@@ -172,7 +172,7 @@
                             (some (fn [prior]
                                     ;; Did we previously drop the constraint?
                                     (and (= table (:alter-table prior))
-                                         (some (fn [[cons & specs]] (= cons constraint))
+                                         (some (fn [cons] (= cons constraint))
                                                (:drop-constraints prior))))
                                   @*plan*))
                       (do
@@ -322,7 +322,7 @@
   (if db
     (jdbc/query
      (db-spec db)
-     ["SELECT 1 from information_schema.table_constraints WHERE CONSTRAINT_SCHEMA=SCHEMA() AND CONSTRAINT_NAME=? AND CONSTRAINT_TYPE='FOREIGN KEY'"
+     ["SELECT 1 from information_schema.constraints WHERE CONSTRAINT_SCHEMA=SCHEMA() AND CONSTRAINT_NAME=? AND CONSTRAINT_TYPE='REFERENTIAL'"
       (s/upper-case fk)]
      :result-set-fn first)
     false))

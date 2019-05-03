@@ -129,7 +129,7 @@
                   (some (fn [prior]
                           ;; Did we previously drop the constraint?
                           (and (= table (:alter-table prior))
-                               (some (fn [[cons & specs]] (= cons constraint))
+                               (some (fn [cons] (= cons constraint))
                                      (:drop-constraints prior))))
                         @*plan*))
             (do
