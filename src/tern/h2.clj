@@ -115,94 +115,101 @@
     table-options :table-options character-set :character-set}]
   (log/info " - Altering table" (log/highlight (name table)))
   (let [additions
-        (for [[column & specs] add-columns]
-          (if (and *db*
-                   (column-exists? *db* (to-sql-name table) (to-sql-name column))
-                   (not (some (fn [prior]
-                                (and (= table (:alter-table prior))
-                                     (some (fn [col] (= col column)) (:drop-columns prior))))
-                              @*plan*)))
-            (do (log/info (format "   * Skipping ADD COLUMN %s.%s because it already exists."
-                                  (to-sql-name table) (to-sql-name column)))
-                nil)
-            (do (log/info "    * Adding column" (log/highlight (name column)))
-                (format "ALTER TABLE %s ADD COLUMN %s %s"
-                        (to-sql-name table)
-                        (to-sql-name column)
-                        (s/join " " (remove-unsupported-column-specs specs))))))
-        removals
-        (for [column drop-columns]
-          ;; Note: No test for prior alter table/add column or create table w/ column
-          ;; because frankly it would not make sense in a single migration to create
-          ;; a table column and then immediately drop it.
-          (if (or (not *db*)
-                  (column-exists? *db* (to-sql-name table) (to-sql-name column)))
-            (do (log/info "    * Dropping column" (log/highlight (name column)))
-                (format "ALTER TABLE %s DROP COLUMN %s"
-                        (to-sql-name table)
-                        (to-sql-name column)))
-            (do (log/info "   * Skipping DROP COLUMN %s.%s because that column does not exist."
-                          (to-sql-name table) (to-sql-name column))
-                nil)))
-        modifications
-        (for [[column & specs] modify-columns]
-          (do (log/info "    * Modifying column" (log/highlight (name column)))
-              (format "ALTER TABLE %s MODIFY COLUMN %s %s"
-                      (to-sql-name table)
-                      (to-sql-name column)
-                      (s/join " " (remove-unsupported-column-specs specs)))))
-        new-constraints
-        (mapcat (fn [[constraint & specs]]
-                  (let [spec-sql (s/join " " specs)
-                        [_ fkcolumn pktable pkcolumn] (re-matches #"(?i)\(([\w_]+)\)\s+REFERENCES\s+([\w_]+)\(([\w_]+)\).*" spec-sql)
-                        _ (if (or (nil? fkcolumn) (nil? pktable) (nil? pkcolumn))
-                            (log/error "Failed to parse constraint for" constraint ":" spec-sql))
-                        existing-constraints (get-matching-foreign-keys *db* (to-sql-name table) (to-sql-name fkcolumn)
-                                                                        (to-sql-name pktable) (to-sql-name pkcolumn))
-                        undropped-existing-constraints (filter (fn [existing]
-                                                                 (not (some (fn [prior]
-                                                                              (some (fn [to-drop]
-                                                                                      (= (s/upper-case (to-sql-name to-drop))
-                                                                                         (s/upper-case (to-sql-name existing))))
-                                                                                    (:drop-constraints prior)))
-                                                                            @*plan*)))
-                                                               existing-constraints)]
-                    (if (or (not *db*)
-                            (not (foreign-key-exists? *db* (to-sql-name constraint)))
-                            (some (fn [prior]
-                                    ;; Did we previously drop the constraint?
-                                    (and (= table (:alter-table prior))
-                                         (some (fn [cons] (= cons constraint))
-                                               (:drop-constraints prior))))
-                                  @*plan*))
-                      (do
-                        (log/info "    * Adding constraint " (log/highlight (if constraint constraint "unnamed")))
-                        (concat (into []
-                                      (for [undropped-constraint undropped-existing-constraints]
-                                        (do (log/info "    * Dropping foreign key" undropped-constraint "because it is being replaced")
-                                            (format "ALTER TABLE %s DROP FOREIGN KEY %s"
-                                                    (s/upper-case (to-sql-name table))
-                                                    (s/upper-case (to-sql-name undropped-constraint))))))
-                                [(format "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY %s" 
-                                         (to-sql-name table)
-                                         (to-sql-name constraint)
-                                         spec-sql)]))
-                      (do (log/info "    * Skipping adding constraint " (log/highlight (if constraint constraint "unnamed"))
-                                    " because it already exists")
-                          nil))))
-                add-constraints)
-       old-constraints
-       (for [constraint drop-constraints]
-         ;; As with drop-column, we are not checking here for add constraint followed by drop constraint
-         ;; in the same migration.  Wouldn't make sense.
-         (if (or (not *db*)
-                 (foreign-key-exists? *db* (to-sql-name constraint)))
-           (do
-             (log/info "    * Removing constraint " (log/highlight constraint))
-             (format "ALTER TABLE %s DROP FOREIGN KEY %s",
-                     (to-sql-name table)
-                     (to-sql-name constraint)))
-           (log/info "   * Skipping removing constraint " (log/highlight constraint) " because it does not exist")))
+        (when (not-empty add-columns)
+          [(format "alter table %s add column (%s)"
+                   (to-sql-name table)
+                   (s/join ", "
+                           (filter identity
+                                   (for [[column & specs] add-columns]
+                                     (if (and *db*
+                                              (column-exists? *db* (to-sql-name table) (to-sql-name column))
+                                              (not (some (fn [prior]
+                                                           (and (= table (:alter-table prior))
+                                                                (some (fn [col] (= col column)) (:drop-columns prior))))
+                                                         @*plan*)))
+                                       (do (log/info (format "   * Skipping ADD COLUMN %s.%s because it already exists."
+                                                             (to-sql-name table) (to-sql-name column)))
+                                           nil)
+                                       (do (log/info "    * Adding column" (log/highlight (name column)))
+                                           (format "%s %s"
+                                                   (to-sql-name column)
+                                                   (s/join " " (remove-unsupported-column-specs specs)))))))))])
+        removals (when (not-empty drop-columns)
+                   [(format "alter table %s drop column %s"
+                         (to-sql-name table)
+                         (s/join ", "
+                                 (filter identity
+                                         (for [column drop-columns]
+                                           ;; Note: No test for prior alter table/add column or create table w/ column
+                                           ;; because frankly it would not make sense in a single migration to create
+                                           ;; a table column and then immediately drop it.
+                                           (if (or (not *db*)
+                                                   (column-exists? *db* (to-sql-name table) (to-sql-name column)))
+                                             (do (log/info "    * Dropping column" (log/highlight (name column)))
+                                                 (format "%s" (to-sql-name column)))
+                                             (do (log/info "   * Skipping DROP COLUMN %s.%s because that column does not exist."
+                                                           (to-sql-name table) (to-sql-name column))
+                                                 nil))))))])
+        modifications (filter identity (for [[column & specs] modify-columns]
+                                         (do (log/info "    * Modifying column" (log/highlight (name column)))
+                                             (format "ALTER TABLE %s ALTER COLUMN %s %s"
+                                                     (to-sql-name table)
+                                                     (to-sql-name column)
+                                                     (s/join " " (remove-unsupported-column-specs specs))))))
+        new-constraints (filter
+                         identity
+                         (mapcat
+                          (fn [[constraint & specs]]
+                            (let [spec-sql (s/join " " specs)
+                                  [_ fkcolumn pktable pkcolumn] (re-matches #"(?i)\(([\w_]+)\)\s+REFERENCES\s+([\w_]+)\(([\w_]+)\).*" spec-sql)
+                                  _ (if (or (nil? fkcolumn) (nil? pktable) (nil? pkcolumn))
+                                      (log/error "Failed to parse constraint for" constraint ":" spec-sql))
+                                  existing-constraints (get-matching-foreign-keys *db* (to-sql-name table) (to-sql-name fkcolumn)
+                                                                                  (to-sql-name pktable) (to-sql-name pkcolumn))
+                                  undropped-existing-constraints (filter (fn [existing]
+                                                                           (not (some (fn [prior]
+                                                                                        (some (fn [to-drop]
+                                                                                                (= (s/upper-case (to-sql-name to-drop))
+                                                                                                   (s/upper-case (to-sql-name existing))))
+                                                                                              (:drop-constraints prior)))
+                                                                                      @*plan*)))
+                                                                         existing-constraints)]
+                              (if (or (not *db*)
+                                      (not (foreign-key-exists? *db* (to-sql-name constraint)))
+                                      (some (fn [prior]
+                                              ;; Did we previously drop the constraint?
+                                              (and (= table (:alter-table prior))
+                                                   (some (fn [cons] (= cons constraint))
+                                                         (:drop-constraints prior))))
+                                            @*plan*))
+                                (do
+                                  (log/info "    * Adding constraint " (log/highlight (if constraint constraint "unnamed")))
+                                  (concat (into []
+                                                (for [undropped-constraint undropped-existing-constraints]
+                                                  (do (log/info "    * Dropping foreign key" undropped-constraint "because it is being replaced")
+                                                      (format "ALTER TABLE %s DROP FOREIGN KEY %s"
+                                                              (to-sql-name table)
+                                                              (s/upper-case (to-sql-name undropped-constraint))))))
+                                          [(format "ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY %s" 
+                                                   (to-sql-name table)
+                                                   (to-sql-name constraint)
+                                                   spec-sql)]))
+                                (do (log/info "    * Skipping adding constraint " (log/highlight (if constraint constraint "unnamed"))
+                                              " because it already exists")
+                                    nil))))
+                          add-constraints))
+        old-constraints (filter identity
+                                (for [constraint drop-constraints]
+                                  ;; As with drop-column, we are not checking here for add constraint followed by drop constraint
+                                  ;; in the same migration.  Wouldn't make sense.
+                                  (if (or (not *db*)
+                                          (foreign-key-exists? *db* (to-sql-name constraint)))
+                                    (do
+                                      (log/info "    * Removing constraint " (log/highlight constraint))
+                                      (format "ALTER TABLE %s DROP FOREIGN KEY %s",
+                                              (to-sql-name table)
+                                              (to-sql-name constraint)))
+                                    (log/info "   * Skipping removing constraint " (log/highlight constraint) " because it does not exist"))))
         options
         (when (not-empty table-options)
           (log/info "   * Skipping options " table-options " because H2 does not support them")
@@ -211,7 +218,7 @@
         (when character-set
           (log/info "   * Skipping convert to character set because H2 does not support it.")
           [])]
-    (doall (filter identity (concat options charset old-constraints removals additions modifications new-constraints)))))
+    (doall (concat options charset old-constraints removals additions modifications new-constraints))))
 
 (defmethod generate-sql
   :create-index
