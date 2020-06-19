@@ -6,7 +6,7 @@
   (:import [java.util Date]
            [java.sql PreparedStatement Timestamp]))
 
-(declare foreign-key-exists? get-matching-foreign-keys index-exists? column-exists? table-exists? get-column-definition not-indexable-type?)
+(declare foreign-key-exists? primary-key-exists? get-matching-foreign-keys index-exists? column-exists? table-exists? get-column-definition not-indexable-type?)
 
 (def ^:dynamic *db* nil)
 (def ^:dynamic *plan* nil)
@@ -111,7 +111,7 @@
 (defmethod generate-sql
   :alter-table
   [{table :alter-table add-columns :add-columns drop-columns :drop-columns modify-columns :modify-columns
-    add-constraints :add-constraints  drop-constraints :drop-constraints
+    add-constraints :add-constraints  drop-constraints :drop-constraints primary-key :primary-key
     table-options :table-options character-set :character-set}]
   (log/info " - Altering table" (log/highlight (name table)))
   (let [additions
@@ -156,6 +156,16 @@
                                                      (to-sql-name table)
                                                      (to-sql-name column)
                                                      (s/join " " (remove-unsupported-column-specs specs))))))
+        primary-key-constraints
+        (if primary-key
+          (if (not (primary-key-exists? *db* (to-sql-name table)))
+            (do (log/info "   * Adding primary key to table " (log/highlight table))
+                [(format "ALTER TABLE %S ADD PRIMARY KEY %s"
+                         (to-sql-name table)
+                         (generate-pk {:primary-key primary-key}))])
+            (do (log/info "   * Not adding primary key to " (log/highlight table) " because it already exists")
+                []))
+          [])
         new-constraints (filter
                          identity
                          (mapcat
@@ -202,14 +212,22 @@
                                 (for [constraint drop-constraints]
                                   ;; As with drop-column, we are not checking here for add constraint followed by drop constraint
                                   ;; in the same migration.  Wouldn't make sense.
-                                  (if (or (not *db*)
-                                          (foreign-key-exists? *db* (to-sql-name constraint)))
-                                    (do
-                                      (log/info "    * Removing constraint " (log/highlight constraint))
-                                      (format "ALTER TABLE %s DROP FOREIGN KEY %s",
-                                              (to-sql-name table)
-                                              (to-sql-name constraint)))
-                                    (log/info "   * Skipping removing constraint " (log/highlight constraint) " because it does not exist"))))
+                                  (if (= constraint :primary-key)
+                                    (if (or (not *db*)
+                                            (primary-key-exists? *db* (to-sql-name table)))
+                                      (do
+                                        (log/info "    * Removing primary key from " (log/highlight table))
+                                        (format "ALTER TABLE %s DROP PRIMARY KEY",
+                                                (to-sql-name table)))
+                                      (log/info "   * Skipping removing primary key from " (log/highlight table) " because it does not have one"))
+                                    (if (or (not *db*)
+                                            (foreign-key-exists? *db* (to-sql-name constraint)))
+                                      (do
+                                        (log/info "    * Removing constraint " (log/highlight constraint))
+                                        (format "ALTER TABLE %s DROP FOREIGN KEY %s",
+                                                (to-sql-name table)
+                                                (to-sql-name constraint)))
+                                      (log/info "   * Skipping removing constraint " (log/highlight constraint) " because it does not exist")))))
         options
         (when (not-empty table-options)
           (log/info "   * Skipping options " table-options " because H2 does not support them")
@@ -218,7 +236,7 @@
         (when character-set
           (log/info "   * Skipping convert to character set because H2 does not support it.")
           [])]
-    (doall (concat options charset old-constraints removals additions modifications new-constraints))))
+    (doall (concat options charset old-constraints removals additions modifications primary-key-constraints new-constraints))))
 
 (defmethod generate-sql
   :create-index
@@ -253,7 +271,7 @@
                                         (not (not-indexable-type? type))))
                                     columns)]
       (if (empty? indexable-columns)
-        (do (log/info (format "   * Skipping creating index %s because none of the specified columns are indexable." index))
+        (do (log/warn (format "    * Skipping creating index %s because none of the specified columns are indexable." index))
             [])
         (do (log/info " - Creating" (if unique "unique" "") "index" (log/highlight (name index)) "on" (log/highlight (name table)))
             [(format "CREATE %s INDEX %s ON %s (%s)"
@@ -308,9 +326,9 @@
 (defn- database-exists?
   [db]
   (jdbc/query
-    (db-spec db)
-    ["SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?" (:schema db "PUBLIC")]
-    :result-set-fn first))
+   (db-spec db)
+   ["SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?" (:schema db "PUBLIC")]
+   :result-set-fn first))
 
 (defn get-matching-foreign-keys
   [db fktable fkcolumn pktable pkcolumn]
@@ -323,6 +341,16 @@
          (s/upper-case fkcolumn)
          (s/upper-case pktable)
          (s/upper-case pkcolumn)])))
+
+(defn primary-key-exists?
+  [db table]
+  (if db
+    (jdbc/query
+     (db-spec db)
+     ["SELECT 1 from information_schema.constraints WHERE CONSTRAINT_SCHEMA=SCHEMA() AND TABLE_NAME=? AND CONSTRAINT_TYPE='PRIMARY KEY'"
+      (s/upper-case table)]
+     :result-set-fn first)
+    false))
 
 (defn foreign-key-exists?
   [db fk]
@@ -356,7 +384,11 @@
 
 (defn not-indexable-type?
   [datatype]
-  (#{"CLOB" "TINYTEXT" "TEXT" "MEDIUMTEXT" "LONGTEXT" "NTEXT" "NCLOB" "BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB" "IMAGE" "OID"}
+  (#{"CLOB"
+     "NCLOB" "BLOB" "TINYBLOB" "MEDIUMBLOB" "LONGBLOB" "IMAGE" "OID"
+     ;; yeah, these are not indexable either--even though you'll find suggestions on stackoverflow that they are.
+     "TINYTEXT" "TEXT" "MEDIUMTEXT" "LONGTEXT" "NTEXT"
+     }
    (s/upper-case (name datatype))))
 
 (defn- get-column-definition

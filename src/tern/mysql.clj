@@ -6,7 +6,7 @@
   (:import [java.util Date]
            [java.sql PreparedStatement Timestamp]))
 
-(declare foreign-key-exists? index-exists? column-exists? table-exists?)
+(declare primary-key-exists? foreign-key-exists? index-exists? column-exists? table-exists?)
 
 (def ^:dynamic *db* nil)
 (def ^:dynamic *plan* nil)
@@ -83,6 +83,7 @@
   :alter-table
   [{table :alter-table add-columns :add-columns drop-columns :drop-columns modify-columns :modify-columns
     add-constraints :add-constraints  drop-constraints :drop-constraints
+    primary-key :primary-key
     table-options :table-options character-set :character-set}]
   (log/info " - Altering table" (log/highlight (name table)))
   (let [additions
@@ -121,6 +122,10 @@
               (format "MODIFY COLUMN %s %s"
                       (to-sql-name column)
                       (s/join " " specs))))
+        primary-key-constraints
+        (if primary-key
+          [(generate-pk {:primary-key primary-key})]
+          [])
         new-constraints
         (filter identity
                 (for [[constraint & specs] add-constraints]
@@ -144,13 +149,20 @@
                 (for [constraint drop-constraints]
                   ;; As with drop-column, we are not checking here for add constraint followed by drop constraint
                   ;; in the same migration.  Wouldn't make sense.
-                  (if (or (not *db*)
-                          (foreign-key-exists? *db* (to-sql-name constraint)))
-                    (do
-                      (log/info "    * Removing constraint " (log/highlight constraint))
-                      (format "DROP FOREIGN KEY %s",
-                              (to-sql-name constraint)))
-                    (log/info "   * Skipping removing constraint " (log/highlight constraint) " because it does not exist"))))
+                  (if (= constraint :primary-key)
+                    (if (or (not *db*)
+                            (primary-key-exists? *db* (to-sql-name table)))
+                      (do
+                        (log/info "   * Removing primary key from " (log/highlight table))
+                        "DROP PRIMARY KEY")
+                      (log/info "   * Skipping removing primary key from " (log/highlight table) " because it does not have one"))
+                    (if (or (not *db*)
+                            (foreign-key-exists? *db* (to-sql-name constraint)))
+                      (do
+                        (log/info "    * Removing constraint " (log/highlight constraint))
+                        (format "DROP FOREIGN KEY %s",
+                                (to-sql-name constraint)))
+                      (log/info "   * Skipping removing constraint " (log/highlight constraint) " because it does not exist")))))
         options
         (when (not-empty table-options)
           [(generate-options table-options)])
@@ -164,7 +176,7 @@
     [(format "ALTER TABLE %s %s"
              (to-sql-name table)
              (s/join ", "
-                     (concat options charset old-constraints removals additions modifications new-constraints)))]))
+                     (concat options charset old-constraints removals additions modifications primary-key-constraints new-constraints)))]))
 
 (defmethod generate-sql
   :create-index
@@ -232,6 +244,15 @@
     ["SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?" (:database db)]
     :result-set-fn first))
 
+(defn- primary-key-exists?
+  [db table]
+  (if db
+    (jdbc/query
+     (db-spec db)
+     ["SELECT 1 from information_schema.table_constraints WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME=? AND CONSTRAINT_TYPE='PRIMARY KEY'" table]
+     :result-set-fn first)
+    false))
+  
 (defn- foreign-key-exists?
   [db fk]
   (if db
